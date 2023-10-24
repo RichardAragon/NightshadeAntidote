@@ -1,0 +1,166 @@
+# Importing the required libraries
+import cv2 # For image processing
+import numpy as np # For numerical operations
+import matplotlib.pyplot as plt # For plotting and visualization
+import scipy.fftpack as fft # For Fourier Transform
+from PIL import Image # For metadata extraction
+from collections import Counter # For histogram calculation
+
+# Loading and preprocessing the input image
+img = cv2.imread("input.jpg") # Reading the image from file
+img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) # Converting to grayscale
+img = cv2.resize(img, (512, 512)) # Resizing to a fixed size
+img = img / 255.0 # Normalizing the pixel values
+
+# A function to detect block copying/pasting using DCT
+def detect_copy_move(img, patch_size=8, threshold=0.1):
+    flags = np.zeros_like(img) # A matrix to store the flags
+    dct_img = cv2.dct(img) # Applying DCT to the image
+    for i in range(0, img.shape[0], patch_size): # Looping over the rows
+        for j in range(0, img.shape[1], patch_size): # Looping over the columns
+            patch = dct_img[i:i+patch_size, j:j+patch_size] # Extracting a patch
+            hist = np.histogram(patch, bins=256)[0] # Computing the histogram
+            entropy = -np.sum(hist * np.log2(hist + 1e-9)) # Computing the entropy
+            if i > 0: # Checking the upper patch
+                upper_patch = dct_img[i-patch_size:i, j:j+patch_size]
+                upper_hist = np.histogram(upper_patch, bins=256)[0]
+                upper_entropy = -np.sum(upper_hist * np.log2(upper_hist + 1e-9))
+                if abs(entropy - upper_entropy) < threshold: # Comparing the entropies
+                    flags[i:i+patch_size, j:j+patch_size] = 1 # Raising a flag
+                    flags[i-patch_size:i, j:j+patch_size] = 1 
+            if j > 0: # Checking the left patch
+                left_patch = dct_img[i:i+patch_size, j-patch_size:j]
+                left_hist = np.histogram(left_patch, bins=256)[0]
+                left_entropy = -np.sum(left_hist * np.log2(left_hist + 1e-9))
+                if abs(entropy - left_entropy) < threshold:
+                    flags[i:i+patch_size, j:j+patch_size] = 1 
+                    flags[i:i+patch_size, j-patch_size:j] = 1 
+    return flags
+
+# A function to analyze metadata using OpenCV instead of PIL
+def analyze_metadata(img):
+    metadata = img.get(cv2.CAP_PROP_EXIF) # Extracting the metadata using OpenCV
+    for tag_id in metadata: # Looping over the metadata tags
+        tag_name = TAGS.get(tag_id, tag_id) # Getting the tag name
+        value = metadata.get(tag_id) # Getting the tag value
+        print(f"{tag_name}: {value}") # Printing the tag name and value
+
+# A function to apply spectral analysis and split into magnitude and phase spectra
+def spectral_analysis(img):
+    f_img = fft.fft2(img) # Applying Fourier Transform to the image
+    f_img_shifted = fft.fftshift(f_img) # Shifting the zero-frequency component to the center of spectrum
+    
+    magnitude_spectrum = np.log(np.abs(f_img_shifted)) # Computing the magnitude spectrum
+    
+    phase_spectrum = np.angle(f_img_shifted) # Computing the phase spectrum
+    
+    return magnitude_spectrum, phase_spectrum
+
+# A function to inspect pixel ordering by comparing DCT coefficients with a reference image after alignment and normalization
+def pixel_ordering_check(img):
+    ref_img = cv2.imread("reference.jpg") # Reading a reference image from file
+    ref_img = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY) # Converting to grayscale
+    
+    img_dct = cv2.dct(img) # Applying DCT to the input image
+    
+    ref_dct = cv2.dct(ref_img) # Applying DCT to the reference image
+    
+    img_dct_normed = (img_dct - img_dct.mean()) / img_dct.std() # Normalizing the input DCT coefficients
+    
+    ref_dct_normed = (ref_dct - ref_dct.mean()) / ref_dct.std() # Normalizing the reference DCT coefficients
+    
+    diff_dct_normed = np.abs(img_dct_normed - ref_dct_normed) # Computing the absolute difference between normalized DCT coefficients
+    
+    return diff_dct_normed
+
+# A function to identify compression artifacts by checking JPEG quantization artifacts in the DCT coefficients
+def compression_artifacts_check(img):
+    bit_depth = img.dtype.itemsize * 8 # Computing the bit depth of the image
+    compression_ratio = os.path.getsize("input.jpg") / (img.shape[0] * img.shape[1] * bit_depth / 8) # Computing the compression ratio of the image
+    print(f"Bit depth: {bit_depth}")
+    print(f"Compression ratio: {compression_ratio}")
+    
+    dct_img = cv2.dct(img) # Applying DCT to the image
+    
+    quantization_table = np.array([[16, 11, 10, 16, 24, 40, 51, 61], # The JPEG quantization table for luminance
+                                   [12, 12, 14, 19, 26, 58, 60, 55],
+                                   [14, 13, 16, 24, 40, 57, 69, 56],
+                                   [14, 17, 22, 29, 51, 87, 80, 62],
+                                   [18, 22, 37, 56, 68,109,103, 77],
+                                   [24, 35, 55, 64, 81,104,113, 92],
+                                   [49, 64, 78, 87,103,121,120,101],
+                                   [72, 92, 95, 98,112,100,103,99]])
+    
+    quantization_artifacts = dct_img % quantization_table # Computing the remainder of dividing DCT coefficients by quantization table
+    
+    return quantization_artifacts
+
+# A function to investigate file format conversions by checking the header and footer bytes
+def file_format_check(img):
+    header = open("input.jpg", "rb").read(2) # Reading the first two bytes of the file
+    if header == b"\xff\xd8": # Checking if the header matches JPEG format
+        print("The file format is JPEG")
+    else:
+        print("The file format is not JPEG")
+
+    footer = open("input.jpg", "rb").read()[-2:] # Reading the last two bytes
+    if footer == b"\xff\xd9": # Checking if the footer matches JPEG format
+        print("The file format is JPEG")
+    else:
+        print("The file format is not JPEG")
+
+# A function to output a report summarizing the forensic findings
+def output_report(img):
+    report = "" # An empty string to store the report
+    
+    report += "Image Forensics Report\n"
+    report += "=====================\n\n"
+    
+    report += "Metadata Analysis\n"
+    report += "-----------------\n"
+    metadata = analyze_metadata(img) # Calling the metadata analysis function
+    report += metadata + "\n" # Adding the metadata to the report
+    
+    report += "Copy-Move Forgery Detection\n"
+    report += "---------------------------\n"
+    flags = detect_copy_move(img) # Calling the copy-move detection function
+    num_flags = np.sum(flags) # Counting the number of flags raised
+    if num_flags > 0: # If there are any flags raised
+        report += f"Detected {num_flags} regions that are likely copied and pasted.\n" # Reporting the number of regions
+        plt.imshow(flags) # Plotting the flags on an image
+        plt.title("Copy-Move Regions") # Adding a title to the plot
+        plt.show() # Showing the plot
+    else: # If there are no flags raised
+        report += "No copy-move forgery detected.\n" # Reporting no forgery
+    
+    report += "Spectral Analysis\n"
+    report += "-----------------\n"
+    magnitude_spectrum, phase_spectrum = spectral_analysis(img) # Calling the spectral analysis function and getting both spectra
+    plt.imshow(magnitude_spectrum) # Plotting the magnitude spectrum
+    plt.title("Magnitude Spectrum") # Adding a title to the plot
+    plt.show() # Showing the plot
+    plt.imshow(phase_spectrum) # Plotting the phase spectrum
+    plt.title("Phase Spectrum") # Adding a title to the plot
+    plt.show() # Showing the plot
+    
+    report += "Pixel Ordering Check\n"
+    report += "-------------------\n"
+    diff_dct_normed = pixel_ordering_check(img) # Calling the pixel ordering check function and getting the difference matrix
+    plt.imshow(diff_dct_normed) # Plotting the difference matrix
+    plt.title("Pixel Ordering Difference") # Adding a title to the plot
+    plt.show() # Showing the plot
+    
+    report += "Compression Artifacts Check\n"
+    report += "--------------------------\n"
+    quantization_artifacts = compression_artifacts_check(img) # Calling the compression artifacts check function and getting the quantization artifacts matrix
+    plt.imshow(quantization_artifacts) # Plotting the quantization artifacts matrix
+    plt.title("Quantization Artifacts") # Adding a title to the plot
+    plt.show() # Showing the plot
+    
+    report += "File Format Check\n"
+    report += "-----------------\n"
+    file_format_check(img) # Calling the file format check function and printing the results
+    
+    report += "\nEnd of Report\n"
+    
+    print(report) # Printing the final report

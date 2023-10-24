@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt # For plotting and visualization
 import scipy.fftpack as fft # For Fourier Transform
 from PIL import Image # For metadata extraction
 from collections import Counter # For histogram calculation
+from sklearn.neighbors import NearestNeighbors # For KNN search
+import exiftool # For metadata extraction
 
 # Loading and preprocessing the input image
 img = cv2.imread("input.jpg") # Reading the image from file
@@ -12,40 +14,41 @@ img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) # Converting to grayscale
 img = cv2.resize(img, (512, 512)) # Resizing to a fixed size
 img = img / 255.0 # Normalizing the pixel values
 
-# A function to detect block copying/pasting using DCT
+# A function to detect block copying/pasting using KNN search
 def detect_copy_move(img, patch_size=8, threshold=0.1):
     flags = np.zeros_like(img) # A matrix to store the flags
     dct_img = cv2.dct(img) # Applying DCT to the image
+    patches = [] # A list to store the patches
+    indices = [] # A list to store the patch indices
     for i in range(0, img.shape[0], patch_size): # Looping over the rows
         for j in range(0, img.shape[1], patch_size): # Looping over the columns
             patch = dct_img[i:i+patch_size, j:j+patch_size] # Extracting a patch
-            hist = np.histogram(patch, bins=256)[0] # Computing the histogram
-            entropy = -np.sum(hist * np.log2(hist + 1e-9)) # Computing the entropy
-            if i > 0: # Checking the upper patch
-                upper_patch = dct_img[i-patch_size:i, j:j+patch_size]
-                upper_hist = np.histogram(upper_patch, bins=256)[0]
-                upper_entropy = -np.sum(upper_hist * np.log2(upper_hist + 1e-9))
-                if abs(entropy - upper_entropy) < threshold: # Comparing the entropies
-                    flags[i:i+patch_size, j:j+patch_size] = 1 # Raising a flag
-                    flags[i-patch_size:i, j:j+patch_size] = 1 
-            if j > 0: # Checking the left patch
-                left_patch = dct_img[i:i+patch_size, j-patch_size:j]
-                left_hist = np.histogram(left_patch, bins=256)[0]
-                left_entropy = -np.sum(left_hist * np.log2(left_hist + 1e-9))
-                if abs(entropy - left_entropy) < threshold:
-                    flags[i:i+patch_size, j:j+patch_size] = 1 
-                    flags[i:i+patch_size, j-patch_size:j] = 1 
+            patches.append(patch.flatten()) # Flattening and appending the patch to the list
+            indices.append((i, j)) # Appending the patch index to the list
+    
+    patches = np.array(patches) # Converting the list of patches to a numpy array
+    
+    nbrs = NearestNeighbors(n_neighbors=2, algorithm='auto').fit(patches) # Fitting a KNN model on the patches
+    
+    distances, neighbors = nbrs.kneighbors(patches) # Finding the distances and neighbors for each patch
+    
+    for i in range(len(patches)): # Looping over the patches
+        if distances[i][1] < threshold: # If the distance to the second nearest neighbor is less than the threshold
+            x1, y1 = indices[i] # Getting the index of the current patch
+            x2, y2 = indices[neighbors[i][1]] # Getting the index of the second nearest neighbor patch
+            flags[x1:x1+patch_size, y1:y1+patch_size] = 1 # Raising a flag for both patches
+            flags[x2:x2+patch_size, y2:y2+patch_size] = 1 
+    
     return flags
 
-# A function to analyze metadata using OpenCV instead of PIL
+# A function to analyze metadata using ExifTool instead of PIL or OpenCV
 def analyze_metadata(img):
-    metadata = img.get(cv2.CAP_PROP_EXIF) # Extracting the metadata using OpenCV
-    for tag_id in metadata: # Looping over the metadata tags
-        tag_name = TAGS.get(tag_id, tag_id) # Getting the tag name
-        value = metadata.get(tag_id) # Getting the tag value
-        print(f"{tag_name}: {value}") # Printing the tag name and value
+    with exiftool.ExifTool() as et: # Creating an ExifTool object
+        metadata = et.get_metadata("input.jpg") # Extracting the metadata from the image file using ExifTool
+        for tag in metadata: # Looping over the metadata tags
+            print(f"{tag}: {metadata[tag]}") # Printing the tag name and value
 
-# A function to apply spectral analysis and split into magnitude and phase spectra
+# A function to apply spectral analysis and split into magnitude and phase spectra and plot them separately
 def spectral_analysis(img):
     f_img = fft.fft2(img) # Applying Fourier Transform to the image
     f_img_shifted = fft.fftshift(f_img) # Shifting the zero-frequency component to the center of spectrum
@@ -54,9 +57,21 @@ def spectral_analysis(img):
     
     phase_spectrum = np.angle(f_img_shifted) # Computing the phase spectrum
     
+    plt.figure(figsize=(10, 5)) # Creating a figure with a fixed size
+    
+    plt.subplot(121) # Creating a subplot for magnitude spectrum
+    plt.imshow(magnitude_spectrum) # Plotting the magnitude spectrum
+    plt.title("Magnitude Spectrum") # Adding a title to the plot
+    
+    plt.subplot(122) # Creating a subplot for phase spectrum
+    plt.imshow(phase_spectrum) # Plotting the phase spectrum
+    plt.title("Phase Spectrum") # Adding a title to the plot
+    
+    plt.show() # Showing both plots
+    
     return magnitude_spectrum, phase_spectrum
 
-# A function to inspect pixel ordering by comparing DCT coefficients with a reference image after alignment and normalization
+# A function to inspect pixel ordering by comparing DCT coefficients with a reference image after alignment and normalization using correlation coefficient as a metric
 def pixel_ordering_check(img):
     ref_img = cv2.imread("reference.jpg") # Reading a reference image from file
     ref_img = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY) # Converting to grayscale
@@ -69,11 +84,11 @@ def pixel_ordering_check(img):
     
     ref_dct_normed = (ref_dct - ref_dct.mean()) / ref_dct.std() # Normalizing the reference DCT coefficients
     
-    diff_dct_normed = np.abs(img_dct_normed - ref_dct_normed) # Computing the absolute difference between normalized DCT coefficients
+    corr_coeff = np.corrcoef(img_dct_normed.flatten(), ref_dct_normed.flatten())[0, 1] # Computing the correlation coefficient between the normalized DCT coefficients
     
-    return diff_dct_normed
+    return corr_coeff
 
-# A function to identify compression artifacts by checking JPEG quantization artifacts in the DCT coefficients
+# A function to identify compression artifacts by checking JPEG quantization artifacts in the DCT coefficients using a threshold
 def compression_artifacts_check(img):
     bit_depth = img.dtype.itemsize * 8 # Computing the bit depth of the image
     compression_ratio = os.path.getsize("input.jpg") / (img.shape[0] * img.shape[1] * bit_depth / 8) # Computing the compression ratio of the image
@@ -93,7 +108,13 @@ def compression_artifacts_check(img):
     
     quantization_artifacts = dct_img % quantization_table # Computing the remainder of dividing DCT coefficients by quantization table
     
-    return quantization_artifacts
+    threshold = quantization_table * 0.1 # Setting a threshold as a percentage of the quantization table values
+    
+    flags = np.zeros_like(img) # A matrix to store the flags
+    
+    flags[quantization_artifacts < threshold] = 1 # Raising a flag for any DCT coefficient that is less than the threshold
+    
+    return flags
 
 # A function to investigate file format conversions by checking the header and footer bytes
 def file_format_check(img):
@@ -136,31 +157,43 @@ def output_report(img):
     report += "Spectral Analysis\n"
     report += "-----------------\n"
     magnitude_spectrum, phase_spectrum = spectral_analysis(img) # Calling the spectral analysis function and getting both spectra
+    plt.figure(figsize=(10, 5)) # Creating a figure with a fixed size
+    
+    plt.subplot(121) # Creating a subplot for magnitude spectrum
     plt.imshow(magnitude_spectrum) # Plotting the magnitude spectrum
     plt.title("Magnitude Spectrum") # Adding a title to the plot
-    plt.show() # Showing the plot
+    
+    plt.subplot(122) # Creating a subplot for phase spectrum
     plt.imshow(phase_spectrum) # Plotting the phase spectrum
     plt.title("Phase Spectrum") # Adding a title to the plot
-    plt.show() # Showing the plot
     
-    report += "Pixel Ordering Check\n"
-    report += "-------------------\n"
-    diff_dct_normed = pixel_ordering_check(img) # Calling the pixel ordering check function and getting the difference matrix
-    plt.imshow(diff_dct_normed) # Plotting the difference matrix
-    plt.title("Pixel Ordering Difference") # Adding a title to the plot
-    plt.show() # Showing the plot
+    plt.show() # Showing both plots
     
-    report += "Compression Artifacts Check\n"
-    report += "--------------------------\n"
-    quantization_artifacts = compression_artifacts_check(img) # Calling the compression artifacts check function and getting the quantization artifacts matrix
-    plt.imshow(quantization_artifacts) # Plotting the quantization artifacts matrix
-    plt.title("Quantization Artifacts") # Adding a title to the plot
-    plt.show() # Showing the plot
+    # Checking for any anomalies in the spectra
+    mag_mean = np.mean(magnitude_spectrum) # Computing the mean of the magnitude spectrum
+    mag_std = np.std(magnitude_spectrum) # Computing the standard deviation of the magnitude spectrum
+    mag_threshold = mag_mean + 3 * mag_std # Setting a threshold as three standard deviations above the mean
+    mag_anomalies = np.where(magnitude_spectrum > mag_threshold) # Finding the indices where the magnitude spectrum exceeds the threshold
+    if len(mag_anomalies[0]) > 0: # If there are any anomalies
+        report += f"Detected {len(mag_anomalies[0])} anomalies in the magnitude spectrum.\n" # Reporting the number of anomalies
+        report += "These anomalies may indicate hidden messages, periodic noise, or resampling in the image.\n" # Explaining the possible causes of anomalies
+        plt.scatter(mag_anomalies[1], mag_anomalies[0], c='r', marker='x') # Plotting the anomalies on the magnitude spectrum
+        plt.title("Magnitude Spectrum Anomalies") # Adding a title to the plot
+        plt.show() # Showing the plot
+    else: # If there are no anomalies
+        report += "No anomalies detected in the magnitude spectrum.\n" # Reporting no anomalies
     
-    report += "File Format Check\n"
-    report += "-----------------\n"
-    file_format_check(img) # Calling the file format check function and printing the results
+    phase_mean = np.mean(phase_spectrum) # Computing the mean of the phase spectrum
+    phase_std = np.std(phase_spectrum) # Computing the standard deviation of the phase spectrum
+    phase_threshold = phase_mean + 3 * phase_std # Setting a threshold as three standard deviations above the mean
+    phase_anomalies = np.where(phase_spectrum > phase_threshold) # Finding the indices where the phase spectrum exceeds the threshold
+    if len(phase_anomalies[0]) > 0: # If there are any anomalies
+        report += f"Detected {len(phase_anomalies[0])} anomalies in the phase spectrum.\n" # Reporting the number of anomalies
+        report += "These anomalies may indicate geometric transformations, such as rotation, scaling, or cropping in the image.\n" # Explaining the possible causes of anomalies
+        plt.scatter(phase_anomalies[1], phase_anomalies[0], c='r', marker='x') # Plotting the anomalies on the phase spectrum
+        plt.title("Phase Spectrum Anomalies") # Adding a title to the plot
+        plt.show() # Showing the plot
+    else: # If there are no anomalies
+        report += "No anomalies detected in the phase spectrum.\n" # Reporting no anomalies
     
-    report += "\nEnd of Report\n"
-    
-    print(report) # Printing the final report
+    return magnitude_spectrum, phase_spectrum

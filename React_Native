@@ -1,0 +1,82 @@
+import React, { useState } from 'react';
+import { View, Text, Button, Image } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
+import * as cv from 'opencv4nodejs';
+import * as tf from '@tensorflow/tfjs-react-native';
+
+const ImageForensics = () => {
+  const [images, setImages] = useState([]);
+  const [results, setResults] = useState([]);
+
+  const pickImages = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      alert('Sorry, we need camera roll permissions to select images.');
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsMultipleSelection: true,
+      quality: 1,
+    });
+
+    if (!result.cancelled) {
+      setImages(result.uri);
+    }
+  };
+
+  const analyzeImages = async () => {
+    const tempResults = [];
+
+    for (const imageUri of images) {
+      const imgBuffer = await FileSystem.readAsStringAsync(imageUri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      const img = await cv.imdecode(Buffer.from(imgBuffer, 'base64'));
+      const grayImg = await img.bgrToGray();
+      const resizedImg = await grayImg.resize(512, 512);
+      const normalizedImg = await resizedImg.divideScalar(255);
+
+      const copyMoveFlags = detectCopyMove(normalizedImg);
+      const compressionFlags = compressionArtifactsCheck(normalizedImg);
+
+      const magnitudeSpectrum = await tf.tensor(normalizedImg.getDataAsArray()).rfft().abs().arraySync();
+      const phaseSpectrum = await tf.tensor(normalizedImg.getDataAsArray()).rfft().angle().arraySync();
+
+      const result = {
+        uri: imageUri,
+        copyMoveFlags: copyMoveFlags.countNonZero(),
+        compressionFlags: compressionFlags.countNonZero(),
+        magnitudeSpectrum,
+        phaseSpectrum,
+      };
+
+      tempResults.push(result);
+    }
+
+    setResults(tempResults);
+  };
+
+  return (
+    <View>
+      <Button title="Select Images" onPress={pickImages} />
+      <Button title="Analyze Images" onPress={analyzeImages} />
+
+      {results.map((result, index) => (
+        <View key={index}>
+          <Image source={{ uri: result.uri }} style={{ width: 200, height: 200 }} />
+          <Text>Copy-Move Flags: {result.copyMoveFlags}</Text>
+          <Text>Compression Flags: {result.compressionFlags}</Text>
+          {/* Display other results */}
+        </View>
+      ))}
+    </View>
+  );
+};
+
+// Helper functions (detectCopyMove, compressionArtifactsCheck, etc.) can be defined separately
+
+export default ImageForensics;
